@@ -46,7 +46,8 @@ uv sync --all-extras
 uv run pytest
 ```
 
-Requires Python 3.11+, NumPy, and SciPy.
+Requires Python 3.11+, NumPy, and SciPy; the demo's plots need matplotlib
+(`--extra demo`).
 
 ## Package layout
 
@@ -143,3 +144,79 @@ Each handler returns an `Outcome` of replies (to the sender) and, if the node
 changed, a summary to re-share. The application decides which peers to share
 with and must route a sensor track's future releases to whichever node now
 holds it.
+
+## Demo: 2D bearings-only robots
+
+`examples/bearings2d` is a small world in which four robots drive
+predetermined arcs around an area and take noisy bearings (σ = 0.17°) of
+five constant-velocity targets that appear in three waves, including a
+closely spaced pair. Robots see targets within 1 km and sample
+asynchronously: every 0.5 s, with their phases staggered across the period,
+and each sample is processed by the fusion nodes as its own frame. Sensor
+tracks are perfect in association (one per robot per target in view), each
+with a small bearing/bearing-rate Kalman filter. The
+initializer triangulates the lines of sight, then filters through 10 s of the
+tracks' measurements and gates on the mean innovation distance.
+
+```bash
+uv run python -m examples.bearings2d --plot outputs
+```
+
+```bash
+uv run python -m examples.bearings2d --mode centralized --release-delay 0.25
+```
+
+The decentralized run uses three fusion nodes, with each robot reporting to two
+of them, so every pair of nodes must deduplicate. Typical results (seeds 0–3,
+after the first 30 s):
+
+| Metric | Centralized | Decentralized |
+| --- | --- | --- |
+| Position RMSE | 2.9 m | 2.7 m |
+| Targets in custody (20 m) | 98% | 96% |
+| Tracks per tracked target | 1.00 | 1.01 |
+| Track purity | 0.96 | 1.00 |
+| Track ID changes (whole run) | 0.8 | 1.5 |
+
+The decentralized solution closely follows the
+centralized one, with more track churn while nodes resolve their overlap.
+Both settle on one pure track per target, nearly always fusing all four
+robots.
+
+Three behaviors are visible in the demo. When a wave of targets appears, every
+robot's sensor track on a target matures within one sampling period; a track
+that matures before its partition's newest pair hypothesis has been scored
+cannot join that partition and may briefly form a duplicate pair, which
+resolves within seconds. Any two non-parallel lines intersect in 2D, so a
+*pair* of sensor tracks can only be rejected over time (the initializer's
+innovation gate) or by a third sensor. And when two targets line up along a
+robot's line of sight, swapped pairings fit nearly as well as the true ones;
+the release gate then withholds the affected tracks until the best hypotheses
+stabilize.
+
+The initializer's `track_residual` is a Mahalanobis distance for a reason: when
+the last target appears, it sits directly behind another target from one
+robot's view, a few meters off that target's line of sight. A raw distance gate
+lets the nearby target's partition claim the new sensor track, and resampling
+then mixes the two targets' tracks for half a minute. Measured against both
+uncertainties, the near miss falls outside the 3-sigma gate and the track starts its own
+partition.
+
+A known limitation: if the cold-start window leaves one target split across
+two *disjoint* partitions (e.g. robots 1+2 and robots 3+4), nothing joins them
+-- resampling works within a partition, and both partitions look healthy -- so
+the target keeps two tracks. In the demo this happens when release delays
+(`--release-delay`) reach about half a sampling period, which widens the
+window.
+
+## Departures from the MFI paper
+
+- **Filtering.** `UnscentedFilter` handles out-of-sequence measurements by
+  rewind-and-replay over a bounded history rather than CISI-FPS smoothing.
+- **Subset re-sharing.** Only the node holding a superset partition can ask
+  the other to prune, and it checks when the subset holder's summary arrives.
+  If the superset forms after the subset holder last shared, and the subset
+  holder's partitions then stop changing, the request would never be made
+  and both nodes would keep a track. So a node that receives a summary showing
+  the sender would make that request replies with its own summary
+  (rate-limited like requests).
