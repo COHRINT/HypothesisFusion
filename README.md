@@ -54,6 +54,7 @@ Requires Python 3.11+, NumPy, and SciPy.
 | --- | --- | --- |
 | `types` | `Measurement`, `SensorTrackRelease`, `SensorTrack`, `Estimate` | MFI II-B |
 | `fusion` | `HypothesisFusion`: one fusion node's tracker | MFI III |
+| `distributed` | Dedup/merge rules and `FusionCoordinator` | MFI III-H |
 | `partitions` | Partitioning, utilization, redundancy | MFI III-B |
 | `scoring` | Windowed innovation-likelihood scoring | — |
 | `resampling` | Bron–Kerbosch clique resampling and reconciliation | — |
@@ -123,3 +124,22 @@ for time, releases in my_sensor_stream:
 # The estimate history of every track ever released.
 histories = node.track_histories
 ```
+
+### Decentralized fusion
+
+Wrap each node in a `FusionCoordinator`. It is transport-agnostic: share
+`coordinator.summary` (returned by `update`/`housekeeping` whenever it changes)
+with peers, and route incoming messages to the matching handler:
+
+| Message | Handler | Effect |
+| --- | --- | --- |
+| `NodeSummary` | `on_summary` | Returns dedup / merge requests to send back, or its own summary if the peer holds a superset it would ask to prune |
+| `DedupRequest` | `on_dedup_request` | Accepts (prunes and ignores the tracks) or rejects |
+| `DedupResponse` | `on_dedup_response` | Clears the outstanding request |
+| `MergeRequest` | `on_merge_request` | Hands over its tracks and relinquishes the partition |
+| `MergeResponse` | `on_merge_response` | Adopts the tracks and resamples the union |
+
+Each handler returns an `Outcome` of replies (to the sender) and, if the node
+changed, a summary to re-share. The application decides which peers to share
+with and must route a sensor track's future releases to whichever node now
+holds it.
